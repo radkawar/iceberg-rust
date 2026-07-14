@@ -43,6 +43,7 @@ pub struct ManifestWriterBuilder {
     key_metadata: Option<Vec<u8>>,
     schema: SchemaRef,
     partition_spec: PartitionSpec,
+    avro_sync_marker: Option<[u8; 16]>,
 }
 
 impl ManifestWriterBuilder {
@@ -60,7 +61,14 @@ impl ManifestWriterBuilder {
             key_metadata,
             schema,
             partition_spec,
+            avro_sync_marker: None,
         }
+    }
+
+    /// Set the Avro object-container sync marker.
+    pub fn with_avro_sync_marker(mut self, marker: [u8; 16]) -> Self {
+        self.avro_sync_marker = Some(marker);
+        self
     }
 
     /// Build a [`ManifestWriter`] for format version 1.
@@ -78,6 +86,7 @@ impl ManifestWriterBuilder {
             self.key_metadata,
             metadata,
             None,
+            self.avro_sync_marker,
         )
     }
 
@@ -96,6 +105,7 @@ impl ManifestWriterBuilder {
             self.key_metadata,
             metadata,
             None,
+            self.avro_sync_marker,
         )
     }
 
@@ -114,6 +124,7 @@ impl ManifestWriterBuilder {
             self.key_metadata,
             metadata,
             None,
+            self.avro_sync_marker,
         )
     }
 
@@ -134,6 +145,7 @@ impl ManifestWriterBuilder {
             // First row id is assigned by the [`ManifestListWriter`] when the manifest
             // is added to the list.
             None,
+            self.avro_sync_marker,
         )
     }
 
@@ -152,6 +164,7 @@ impl ManifestWriterBuilder {
             self.key_metadata,
             metadata,
             None,
+            self.avro_sync_marker,
         )
     }
 }
@@ -177,6 +190,8 @@ pub struct ManifestWriter {
     manifest_entries: Vec<ManifestEntry>,
 
     metadata: ManifestMetadata,
+
+    avro_sync_marker: Option<[u8; 16]>,
 }
 
 impl ManifestWriter {
@@ -187,6 +202,7 @@ impl ManifestWriter {
         key_metadata: Option<Vec<u8>>,
         metadata: ManifestMetadata,
         first_row_id: Option<u64>,
+        avro_sync_marker: Option<[u8; 16]>,
     ) -> Self {
         Self {
             output,
@@ -202,6 +218,7 @@ impl ManifestWriter {
             key_metadata,
             manifest_entries: Vec::new(),
             metadata,
+            avro_sync_marker,
         }
     }
 
@@ -410,7 +427,14 @@ impl ManifestWriter {
             // Manifest schema did not change between V2 and V3
             FormatVersion::V2 | FormatVersion::V3 => manifest_schema_v2(&partition_type)?,
         };
-        let mut avro_writer = AvroWriter::new(&avro_schema, Vec::new());
+        let mut avro_writer = match self.avro_sync_marker {
+            Some(marker) => AvroWriter::builder()
+                .schema(&avro_schema)
+                .writer(Vec::new())
+                .marker(marker)
+                .build(),
+            None => AvroWriter::new(&avro_schema, Vec::new()),
+        };
         avro_writer.add_user_metadata(
             "schema".to_string(),
             to_vec(table_schema).map_err(|err| {

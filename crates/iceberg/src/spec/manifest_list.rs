@@ -135,6 +135,7 @@ impl ManifestListWriter {
             0,
             snapshot_id,
             None,
+            None,
         )
     }
 
@@ -144,6 +145,39 @@ impl ManifestListWriter {
         snapshot_id: i64,
         parent_snapshot_id: Option<i64>,
         sequence_number: i64,
+    ) -> Self {
+        Self::v2_with_optional_avro_sync_marker(
+            output_file,
+            snapshot_id,
+            parent_snapshot_id,
+            sequence_number,
+            None,
+        )
+    }
+
+    /// Construct a v2 [`ManifestListWriter`] with an explicit Avro sync marker.
+    pub fn v2_with_avro_sync_marker(
+        output_file: OutputFile,
+        snapshot_id: i64,
+        parent_snapshot_id: Option<i64>,
+        sequence_number: i64,
+        marker: [u8; 16],
+    ) -> Self {
+        Self::v2_with_optional_avro_sync_marker(
+            output_file,
+            snapshot_id,
+            parent_snapshot_id,
+            sequence_number,
+            Some(marker),
+        )
+    }
+
+    fn v2_with_optional_avro_sync_marker(
+        output_file: OutputFile,
+        snapshot_id: i64,
+        parent_snapshot_id: Option<i64>,
+        sequence_number: i64,
+        avro_sync_marker: Option<[u8; 16]>,
     ) -> Self {
         let mut metadata = HashMap::from_iter([
             ("snapshot-id".to_string(), snapshot_id.to_string()),
@@ -163,6 +197,7 @@ impl ManifestListWriter {
             sequence_number,
             snapshot_id,
             None,
+            avro_sync_marker,
         )
     }
 
@@ -198,6 +233,7 @@ impl ManifestListWriter {
             sequence_number,
             snapshot_id,
             first_row_id,
+            None,
         )
     }
 
@@ -208,13 +244,21 @@ impl ManifestListWriter {
         sequence_number: i64,
         snapshot_id: i64,
         first_row_id: Option<u64>,
+        avro_sync_marker: Option<[u8; 16]>,
     ) -> Self {
         let avro_schema = match format_version {
             FormatVersion::V1 => &MANIFEST_LIST_AVRO_SCHEMA_V1,
             FormatVersion::V2 => &MANIFEST_LIST_AVRO_SCHEMA_V2,
             FormatVersion::V3 => &MANIFEST_LIST_AVRO_SCHEMA_V3,
         };
-        let mut avro_writer = Writer::new(avro_schema, Vec::new());
+        let mut avro_writer = match avro_sync_marker {
+            Some(marker) => Writer::builder()
+                .schema(avro_schema)
+                .writer(Vec::new())
+                .marker(marker)
+                .build(),
+            None => Writer::new(avro_schema, Vec::new()),
+        };
         for (key, value) in metadata {
             avro_writer
                 .add_user_metadata(key, value)
