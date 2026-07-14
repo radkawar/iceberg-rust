@@ -584,7 +584,65 @@ mod tests {
 
     use super::*;
     use crate::io::FileIO;
-    use crate::spec::{DataFileFormat, Manifest, NestedField, PrimitiveType, Schema, Struct, Type};
+    use crate::spec::{
+        DataFileBuilder, DataFileFormat, Manifest, NestedField, PrimitiveType, Schema, Struct, Type,
+    };
+
+    #[tokio::test]
+    async fn explicit_avro_sync_marker_produces_deterministic_bytes() {
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![Arc::new(NestedField::optional(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Int),
+                ))])
+                .build()
+                .unwrap(),
+        );
+        let partition_spec = PartitionSpec::builder(schema.clone())
+            .with_spec_id(0)
+            .build()
+            .unwrap();
+        let tmp_dir = TempDir::new().unwrap();
+        let io = FileIO::new_with_fs();
+        let marker = [7; 16];
+        let mut bytes = Vec::new();
+
+        for name in ["first.avro", "replay.avro"] {
+            let path = tmp_dir.path().join(name);
+            let mut writer = ManifestWriterBuilder::new(
+                io.new_output(path.to_str().unwrap()).unwrap(),
+                Some(3),
+                None,
+                schema.clone(),
+                partition_spec.clone(),
+            )
+            .with_avro_sync_marker(marker)
+            .build_v2_data();
+            writer
+                .add_file(
+                    DataFileBuilder::default()
+                        .content(DataContentType::Data)
+                        .file_path("data.parquet".to_string())
+                        .file_format(DataFileFormat::Parquet)
+                        .file_size_in_bytes(128)
+                        .record_count(2)
+                        .partition_spec_id(0)
+                        .partition(Struct::empty())
+                        .column_sizes(HashMap::from([(2, 32), (1, 16)]))
+                        .value_counts(HashMap::from([(2, 2), (1, 2)]))
+                        .build()
+                        .unwrap(),
+                    1,
+                )
+                .unwrap();
+            writer.write_manifest_file().await.unwrap();
+            bytes.push(fs::read(path).unwrap());
+        }
+
+        assert_eq!(bytes[0], bytes[1]);
+    }
 
     #[tokio::test]
     async fn test_add_delete_existing() {

@@ -278,6 +278,7 @@ fn to_bytes_entry(v: impl IntoIterator<Item = (i32, Datum)>) -> Result<Vec<Bytes
             value: d.to_bytes()?,
         });
     }
+    bs.sort_unstable_by_key(|entry| entry.key);
     Ok(bs)
 }
 
@@ -300,7 +301,6 @@ fn parse_i64_entry(v: Vec<I64Entry>) -> Result<HashMap<i32, u64>, Error> {
     Ok(m)
 }
 
-#[allow(unused_mut)]
 fn to_i64_entry(entries: HashMap<i32, u64>) -> Result<Vec<I64Entry>, Error> {
     let mut i64_entries = entries
         .iter()
@@ -312,9 +312,7 @@ fn to_i64_entry(entries: HashMap<i32, u64>) -> Result<Vec<I64Entry>, Error> {
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
-    // Ensure that the order is deterministic during testing
-    #[cfg(test)]
-    i64_entries.sort_by_key(|e| e.key);
+    i64_entries.sort_unstable_by_key(|entry| entry.key);
 
     Ok(i64_entries)
 }

@@ -1417,6 +1417,30 @@ mod test {
     };
 
     #[tokio::test]
+    async fn explicit_avro_sync_marker_produces_deterministic_bytes() {
+        let file_io = FileIO::new_with_fs();
+        let tmp_dir = TempDir::new().unwrap();
+        let marker = [7; 16];
+        let mut bytes = Vec::new();
+
+        for name in ["first.avro", "replay.avro"] {
+            let path = tmp_dir.path().join(name);
+            let mut writer = ManifestListWriter::v2_with_avro_sync_marker(
+                file_io.new_output(path.to_str().unwrap()).unwrap(),
+                23,
+                Some(17),
+                5,
+                marker,
+            );
+            writer.add_manifests(std::iter::empty()).unwrap();
+            writer.close().await.unwrap();
+            bytes.push(fs::read(path).unwrap());
+        }
+
+        assert_eq!(bytes[0], bytes[1]);
+    }
+
+    #[tokio::test]
     async fn test_parse_manifest_list_v1() {
         let manifest_list = ManifestList {
             entries: vec![
