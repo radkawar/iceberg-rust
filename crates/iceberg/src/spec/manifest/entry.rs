@@ -24,8 +24,9 @@ use typed_builder::TypedBuilder;
 use crate::avro::schema_to_avro_schema;
 use crate::error::Result;
 use crate::spec::{
-    DataContentType, DataFile, INITIAL_SEQUENCE_NUMBER, ListType, Literal, ManifestFile, MapType,
-    NestedField, NestedFieldRef, PrimitiveLiteral, PrimitiveType, Schema, StructType, Type,
+    DataContentType, DataFile, FormatVersion, INITIAL_SEQUENCE_NUMBER, ListType, Literal,
+    ManifestFile, MapType, NestedField, NestedFieldRef, PrimitiveLiteral, PrimitiveType, Schema,
+    StructType, Type,
 };
 use crate::{Error, ErrorKind};
 
@@ -567,12 +568,7 @@ fn data_file_fields_v2(partition_type: &StructType) -> Vec<NestedFieldRef> {
         SPLIT_OFFSETS.clone(),
         EQUALITY_IDS.clone(),
         SORT_ORDER_ID.clone(),
-        FIRST_ROW_ID.clone(),
         REFERENCE_DATA_FILE.clone(),
-        // Why are the following two fields here in the existing v2 schema?
-        // In the spec, they are not even listed as optional for v2.
-        CONTENT_OFFSET.clone(),
-        CONTENT_SIZE_IN_BYTES.clone(),
     ]
 }
 
@@ -593,6 +589,22 @@ pub(super) fn manifest_schema_v2(partition_type: &StructType) -> Result<AvroSche
             2,
             "data_file",
             Type::Struct(StructType::new(data_file_fields_v2(partition_type))),
+        )),
+    ];
+    let schema = Schema::builder().with_fields(fields).build()?;
+    schema_to_avro_schema("manifest_entry", &schema)
+}
+
+pub(super) fn manifest_schema_v3(partition_type: &StructType) -> Result<AvroSchema> {
+    let fields = vec![
+        STATUS.clone(),
+        SNAPSHOT_ID_V2.clone(),
+        SEQUENCE_NUMBER.clone(),
+        FILE_SEQUENCE_NUMBER.clone(),
+        Arc::new(NestedField::required(
+            2,
+            "data_file",
+            Type::Struct(StructType::new(data_file_fields_v3(partition_type))),
         )),
     ];
     let schema = Schema::builder().with_fields(fields).build()?;
@@ -642,4 +654,62 @@ pub(super) fn manifest_schema_v1(partition_type: &StructType) -> Result<AvroSche
     ];
     let schema = Schema::builder().with_fields(fields).build()?;
     schema_to_avro_schema("manifest_entry", &schema)
+}
+
+pub(super) fn manifest_schema(
+    format_version: FormatVersion,
+    partition_type: &StructType,
+) -> Result<AvroSchema> {
+    match format_version {
+        FormatVersion::V1 => manifest_schema_v1(partition_type),
+        FormatVersion::V2 => manifest_schema_v2(partition_type),
+        FormatVersion::V3 => manifest_schema_v3(partition_type),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v2_and_v3_manifest_schemas_use_their_exact_data_file_fields() {
+        let partition_type = StructType::new(Vec::new());
+
+        let v2 = schema_field_ids(&manifest_schema_v2(&partition_type).unwrap());
+        let v3 = schema_field_ids(&manifest_schema_v3(&partition_type).unwrap());
+
+        assert!(v2.contains(&143));
+        assert!(!v2.contains(&142));
+        assert!(!v2.contains(&144));
+        assert!(!v2.contains(&145));
+        for field_id in [142, 143, 144, 145] {
+            assert!(v3.contains(&field_id));
+        }
+    }
+
+    fn schema_field_ids(schema: &AvroSchema) -> Vec<i64> {
+        let value = serde_json::to_value(schema).unwrap();
+        let mut ids = Vec::new();
+        collect_field_ids(&value, &mut ids);
+        ids
+    }
+
+    fn collect_field_ids(value: &serde_json::Value, ids: &mut Vec<i64>) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect_field_ids(value, ids);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                if let Some(field_id) = fields.get("field-id").and_then(serde_json::Value::as_i64) {
+                    ids.push(field_id);
+                }
+                for value in fields.values() {
+                    collect_field_ids(value, ids);
+                }
+            }
+            _ => {}
+        }
+    }
 }

@@ -29,7 +29,7 @@ use super::{
 use crate::error::Result;
 use crate::io::OutputFile;
 use crate::spec::manifest::_serde::{ManifestEntryV1, ManifestEntryV2};
-use crate::spec::manifest::{manifest_schema_v1, manifest_schema_v2};
+use crate::spec::manifest::manifest_schema;
 use crate::spec::{
     DataContentType, DataFile, FieldSummary, ManifestEntry, ManifestFile, ManifestMetadata,
     ManifestStatus, PrimitiveLiteral, SchemaRef, StructType, UNASSIGNED_SNAPSHOT_ID,
@@ -405,11 +405,7 @@ impl ManifestWriter {
             .partition_spec
             .partition_type(&self.metadata.schema)?;
         let table_schema = &self.metadata.schema;
-        let avro_schema = match self.metadata.format_version {
-            FormatVersion::V1 => manifest_schema_v1(&partition_type)?,
-            // Manifest schema did not change between V2 and V3
-            FormatVersion::V2 | FormatVersion::V3 => manifest_schema_v2(&partition_type)?,
-        };
+        let avro_schema = manifest_schema(self.metadata.format_version, &partition_type)?;
         let mut avro_writer = AvroWriter::new(&avro_schema, Vec::new());
         avro_writer.add_user_metadata(
             "schema".to_string(),
@@ -556,11 +552,68 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    use apache_avro::Reader as AvroReader;
     use tempfile::TempDir;
 
     use super::*;
     use crate::io::FileIO;
     use crate::spec::{DataFileFormat, Manifest, NestedField, PrimitiveType, Schema, Struct, Type};
+
+    #[tokio::test]
+    async fn writer_selects_the_exact_v2_and_v3_manifest_schemas() {
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![Arc::new(NestedField::optional(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Long),
+                ))])
+                .build()
+                .unwrap(),
+        );
+        let partition_spec = PartitionSpec::builder(schema.clone()).build().unwrap();
+        let partition_type = partition_spec.partition_type(&schema).unwrap();
+        let temp = TempDir::new().unwrap();
+        let io = FileIO::new_with_fs();
+
+        let v2_path = temp.path().join("v2.avro");
+        ManifestWriterBuilder::new(
+            io.new_output(v2_path.to_str().unwrap()).unwrap(),
+            Some(1),
+            None,
+            schema.clone(),
+            partition_spec.clone(),
+        )
+        .build_v2_data()
+        .write_manifest_file()
+        .await
+        .unwrap();
+        let v2_bytes = fs::read(v2_path).unwrap();
+        let v2_reader = AvroReader::new(v2_bytes.as_slice()).unwrap();
+        assert_eq!(
+            v2_reader.writer_schema(),
+            &manifest_schema(FormatVersion::V2, &partition_type).unwrap()
+        );
+
+        let v3_path = temp.path().join("v3.avro");
+        ManifestWriterBuilder::new(
+            io.new_output(v3_path.to_str().unwrap()).unwrap(),
+            Some(1),
+            None,
+            schema,
+            partition_spec,
+        )
+        .build_v3_data()
+        .write_manifest_file()
+        .await
+        .unwrap();
+        let v3_bytes = fs::read(v3_path).unwrap();
+        let v3_reader = AvroReader::new(v3_bytes.as_slice()).unwrap();
+        assert_eq!(
+            v3_reader.writer_schema(),
+            &manifest_schema(FormatVersion::V3, &partition_type).unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn test_add_delete_existing() {

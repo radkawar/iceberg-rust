@@ -57,7 +57,7 @@ impl Manifest {
 
         let entries = match metadata.format_version {
             FormatVersion::V1 => {
-                let schema = manifest_schema_v1(&partition_type)?;
+                let schema = manifest_schema(FormatVersion::V1, &partition_type)?;
                 let reader = AvroReader::with_schema(&schema, bs)?;
                 reader
                     .into_iter()
@@ -70,9 +70,8 @@ impl Manifest {
                     })
                     .collect::<Result<Vec<_>>>()?
             }
-            // Manifest Schema & Manifest Entry did not change between V2 and V3
             FormatVersion::V2 | FormatVersion::V3 => {
-                let schema = manifest_schema_v2(&partition_type)?;
+                let schema = manifest_schema(metadata.format_version, &partition_type)?;
                 let reader = AvroReader::with_schema(&schema, bs)?;
                 reader
                     .into_iter()
@@ -161,12 +160,103 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    use apache_avro::{Writer as AvroWriter, to_value};
     use serde_json::Value;
     use tempfile::TempDir;
 
     use super::*;
     use crate::io::FileIO;
-    use crate::spec::{Literal, NestedField, PrimitiveType, Struct, Transform, Type};
+    use crate::spec::{
+        DataContentType, DataFile, DataFileFormat, Literal, ManifestEntry, ManifestStatus,
+        NestedField, PrimitiveType, Struct, Transform, Type,
+    };
+
+    #[test]
+    fn v2_reader_projects_legacy_v3_only_data_file_fields_away() {
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![Arc::new(NestedField::optional(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Long),
+                ))])
+                .build()
+                .unwrap(),
+        );
+        let partition_spec = PartitionSpec::builder(schema.clone()).build().unwrap();
+        let partition_type = partition_spec.partition_type(&schema).unwrap();
+        let entry = ManifestEntry {
+            status: ManifestStatus::Existing,
+            snapshot_id: Some(1),
+            sequence_number: Some(1),
+            file_sequence_number: Some(1),
+            data_file: DataFile {
+                content: DataContentType::PositionDeletes,
+                file_path: "s3://table/delete.puffin".to_owned(),
+                file_format: DataFileFormat::Puffin,
+                partition: Struct::empty(),
+                record_count: 1,
+                file_size_in_bytes: 32,
+                column_sizes: HashMap::new(),
+                value_counts: HashMap::new(),
+                null_value_counts: HashMap::new(),
+                nan_value_counts: HashMap::new(),
+                lower_bounds: HashMap::new(),
+                upper_bounds: HashMap::new(),
+                key_metadata: None,
+                split_offsets: None,
+                equality_ids: None,
+                sort_order_id: None,
+                partition_spec_id: 0,
+                first_row_id: Some(10),
+                referenced_data_file: Some("s3://table/data.parquet".to_owned()),
+                content_offset: Some(4),
+                content_size_in_bytes: Some(8),
+            },
+        };
+        let avro_schema = manifest_schema(FormatVersion::V3, &partition_type).unwrap();
+        let mut writer = AvroWriter::new(&avro_schema, Vec::new());
+        writer
+            .add_user_metadata("schema".to_owned(), serde_json::to_vec(&schema).unwrap())
+            .unwrap();
+        writer
+            .add_user_metadata("schema-id".to_owned(), schema.schema_id().to_string())
+            .unwrap();
+        writer
+            .add_user_metadata(
+                "partition-spec".to_owned(),
+                serde_json::to_vec(partition_spec.fields()).unwrap(),
+            )
+            .unwrap();
+        writer
+            .add_user_metadata(
+                "partition-spec-id".to_owned(),
+                partition_spec.spec_id().to_string(),
+            )
+            .unwrap();
+        writer
+            .add_user_metadata("format-version".to_owned(), "2")
+            .unwrap();
+        writer
+            .add_user_metadata("content".to_owned(), "deletes")
+            .unwrap();
+        let value = to_value(_serde::ManifestEntryV2::try_from(entry, &partition_type).unwrap())
+            .unwrap()
+            .resolve(&avro_schema)
+            .unwrap();
+        writer.append(value).unwrap();
+
+        let bytes = writer.into_inner().unwrap();
+        let manifest = Manifest::parse_avro(&bytes).unwrap();
+        let data_file = manifest.entries()[0].data_file();
+        assert_eq!(
+            data_file.referenced_data_file(),
+            Some("s3://table/data.parquet".to_owned())
+        );
+        assert_eq!(data_file.first_row_id(), None);
+        assert_eq!(data_file.content_offset(), None);
+        assert_eq!(data_file.content_size_in_bytes(), None);
+    }
 
     #[tokio::test]
     async fn test_parse_manifest_v2_unpartition() {
